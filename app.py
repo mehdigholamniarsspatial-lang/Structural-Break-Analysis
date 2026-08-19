@@ -26,9 +26,11 @@ generic single-variable time-series pipeline.
 
 from __future__ import annotations
 
+import base64
 import logging
 import inspect
 from pathlib import Path
+import textwrap
 
 import numpy as np
 import pandas as pd
@@ -116,6 +118,90 @@ st.set_page_config(
 )
 
 
+def _asset_data_uri(filename: str) -> str:
+    """Return a local PNG asset as an embeddable data URI."""
+    asset_path = Path(__file__).resolve().parent / "assets" / filename
+    encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def render_brand_header() -> None:
+    """Render the INPACT/EPA brand banner at the top of every app view."""
+    try:
+        inpact_logo = _asset_data_uri("inpact-mark.png")
+        epa_logo = _asset_data_uri("epa-logo.png")
+    except OSError as exc:
+        logger.warning("Could not load header assets: %s", exc)
+        return
+
+    st.markdown(
+        textwrap.dedent(f"""
+        <style>
+        .block-container {{padding-top: 1.25rem;}}
+        .inpact-app-header {{
+            align-items:center; background:#fff; border:1px solid #e2e8ee;
+            box-shadow:0 4px 14px rgba(22,50,79,.10); display:flex;
+            gap:1.5rem; margin:0 0 1.25rem; min-height:132px;
+            padding:1rem 1.6rem; width:100%;
+        }}
+        .inpact-brand-logo {{flex:0 0 auto; max-height:96px; width:auto; max-width:230px;}}
+        .inpact-header-copy {{
+            border-left:1px solid #dce3e9; flex:1 1 auto; min-width:0;
+            padding-left:1.4rem;
+        }}
+        .inpact-header-title {{
+            color:#16324f; font-size:1.55rem; font-weight:800;
+            line-height:1.14; margin:0;
+        }}
+        .inpact-header-title .accent {{color:#2d9994;}}
+        .inpact-header-subtitle {{
+            color:#667085; font-size:.95rem; line-height:1.35;
+            margin:.4rem 0 0; max-width:760px;
+        }}
+        .inpact-funder {{
+            align-items:center; border-left:1px solid #dce3e9; display:flex;
+            flex:0 0 auto; flex-direction:column; gap:.3rem; padding-left:1.4rem;
+        }}
+        .inpact-funded-by {{
+            color:#667085; font-size:.68rem; font-weight:700;
+            letter-spacing:.09em; text-transform:uppercase;
+        }}
+        .inpact-epa-logo {{height:auto; max-height:58px; width:190px;}}
+        @media (max-width: 900px) {{
+            .inpact-app-header {{min-height:110px; gap:1rem; padding:.8rem 1rem;}}
+            .inpact-brand-logo {{max-height:78px; max-width:185px;}}
+            .inpact-header-title {{font-size:1.2rem;}}
+            .inpact-header-subtitle {{font-size:.8rem;}}
+            .inpact-epa-logo {{width:145px;}}
+        }}
+        @media (max-width: 650px) {{
+            .inpact-header-copy {{display:none;}}
+            .inpact-app-header {{justify-content:space-between; min-height:92px;}}
+            .inpact-funder {{border-left:0; padding-left:0;}}
+            .inpact-funded-by {{display:none;}}
+            .inpact-brand-logo {{max-height:68px; max-width:165px;}}
+            .inpact-epa-logo {{width:125px;}}
+        }}
+        </style>
+        <header class="inpact-app-header">
+          <img class="inpact-brand-logo" src="{inpact_logo}" alt="INPACT project logo">
+          <div class="inpact-header-copy">
+            <h1 class="inpact-header-title"><span class="accent">Ireland</span> Greenhouse Gas Policy Impact Explorer</h1>
+            <p class="inpact-header-subtitle">Explore greenhouse gas emissions, atmospheric pollutants, climate policies and policy effectiveness across Ireland.</p>
+          </div>
+          <div class="inpact-funder">
+            <span class="inpact-funded-by">Funded by</span>
+            <img class="inpact-epa-logo" src="{epa_logo}" alt="Funded by EPA Research">
+          </div>
+        </header>
+        """),
+        unsafe_allow_html=True,
+    )
+
+
+render_brand_header()
+
+
 # ----------------------------------------------------------------------
 # Session state initialization
 # ----------------------------------------------------------------------
@@ -132,6 +218,8 @@ def _init_state() -> None:
         "results": None,
         "t_clean": None,
         "y_clean": None,
+        "t_analysis": None,
+        "y_analysis": None,
         "time_kind": None,
         "cleaning_report": None,
         "error_message": None,
@@ -141,6 +229,35 @@ def _init_state() -> None:
 
 
 _init_state()
+
+
+def render_analysis_period(t_values: np.ndarray, time_kind: str, identity: str) -> tuple[float, float]:
+    """Render synchronized start/end controls for the regression subset."""
+    t_values = np.asarray(t_values, dtype=float)
+    t_min, t_max = float(np.min(t_values)), float(np.max(t_values))
+    fingerprint = f"{identity}|{time_kind}|{len(t_values)}|{t_min:.12g}|{t_max:.12g}"
+    if st.session_state.get("analysis_period_fingerprint") != fingerprint:
+        st.session_state["analysis_start"] = t_min
+        st.session_state["analysis_end"] = t_max
+        st.session_state["analysis_period_fingerprint"] = fingerprint
+
+    st.sidebar.subheader("2. Analysis Period")
+    st.sidebar.caption(
+        "Only observations within this period are used for structural-break, "
+        "regression and trend calculations. The chart still displays the full series."
+    )
+    start_col, end_col = st.sidebar.columns(2)
+    number_format = "%.0f" if time_kind == "numeric-year" and np.allclose(t_values, np.round(t_values)) else "%.3f"
+    step = 1.0 if number_format == "%.0f" else 0.01
+    start = start_col.number_input(
+        "Start", min_value=t_min, max_value=t_max,
+        step=step, format=number_format, key="analysis_start",
+    )
+    end = end_col.number_input(
+        "End", min_value=t_min, max_value=t_max,
+        step=step, format=number_format, key="analysis_end",
+    )
+    return float(start), float(end)
 
 
 # ----------------------------------------------------------------------
@@ -161,6 +278,7 @@ def render_sidebar() -> FigureStyle:
 
     units = ""
     breakpoints_raw = ""
+    analysis_start = analysis_end = None
     date_col = value_col = None
 
     if data_mode.startswith("Bundled"):
@@ -193,7 +311,13 @@ def render_sidebar() -> FigureStyle:
         units = st.sidebar.text_input("Units (for annotation labels)", value="kt CO2-eq")
         date_col, value_col = "Year", f"{gas_label} — {sector}"
 
-        st.sidebar.subheader(r"2. Structural Break Dates ($T_b$)")
+        range_t, range_y = get_sector_series(wide_df, sector)
+        range_t, _, _ = clean_series_pair(range_t, range_y)
+        analysis_start, analysis_end = render_analysis_period(
+            range_t, "numeric-year", f"bundled:{gas_label}:{sector}"
+        )
+
+        st.sidebar.subheader(r"3. Structural Break Dates ($T_b$)")
         st.sidebar.caption("One structural break year per line. Leave empty to estimate a single-regime trajectory over the whole period.")
         breakpoints_raw = st.sidebar.text_area(
             r"Structural Break Dates ($T_b$)", value="2001\n2015", height=100,
@@ -234,7 +358,14 @@ def render_sidebar() -> FigureStyle:
 
         units = st.sidebar.text_input("Units (optional, for annotation labels)", value="")
 
-        st.sidebar.subheader(r"2. Structural Break Dates ($T_b$)")
+        range_t, range_kind = to_numeric_time(df[date_col])
+        range_y = pd.to_numeric(df[value_col], errors="coerce").to_numpy()
+        range_t, _, _ = clean_series_pair(range_t, range_y)
+        analysis_start, analysis_end = render_analysis_period(
+            range_t, range_kind, f"upload:{st.session_state['filename']}:{date_col}:{value_col}"
+        )
+
+        st.sidebar.subheader(r"3. Structural Break Dates ($T_b$)")
         st.sidebar.caption("One structural break date per line. Leave empty to estimate a single-regime trajectory.")
         breakpoints_raw = st.sidebar.text_area(r"Structural Break Dates ($T_b$)", value="", height=100, placeholder="1998\n2007\n2016")
 
@@ -329,7 +460,7 @@ def render_sidebar() -> FigureStyle:
     }
 
     # ---- Regression options -----------------------------------------
-    st.sidebar.subheader("3. Regression Options")
+    st.sidebar.subheader("4. Regression Options")
     method_label = st.sidebar.selectbox(
         "Regression method",
         ["Ordinary Least Squares (OLS)", "Robust Regression (Huber)", "Theil-Sen"],
@@ -344,7 +475,7 @@ def render_sidebar() -> FigureStyle:
     show_mk = st.sidebar.checkbox("Compute Mann-Kendall test", value=False)
 
     # ---- Figure options -----------------------------------------------
-    st.sidebar.subheader("4. Figure Options")
+    st.sidebar.subheader("5. Figure Options")
     style = FigureStyle()
     default_title = value_col if value_col else "Structural Break Analysis"
     style.figure_title = st.sidebar.text_input("Figure title", value=f"Structural Break Analysis: {default_title}")
@@ -412,6 +543,7 @@ def render_sidebar() -> FigureStyle:
         date_col=date_col, value_col=value_col, units=units,
         breakpoints_raw=breakpoints_raw, method=method,
         confidence=confidence_pct / 100.0, show_mk=show_mk,
+        analysis_start=analysis_start, analysis_end=analysis_end,
     )
     return style
 
@@ -460,27 +592,42 @@ def run_analysis() -> None:
 
         t_clean, y_clean, cleaning_report = clean_series_pair(t_numeric, y_raw)
 
+        analysis_start = float(inputs["analysis_start"])
+        analysis_end = float(inputs["analysis_end"])
+        if analysis_start > analysis_end:
+            raise ValueError("Analysis period start must be earlier than or equal to its end.")
+        analysis_mask = (t_clean >= analysis_start) & (t_clean <= analysis_end)
+        t_analysis = t_clean[analysis_mask]
+        y_analysis = y_clean[analysis_mask]
+        if len(t_analysis) < 3:
+            raise ValueError(
+                "The selected analysis period contains fewer than 3 valid observations. "
+                "Please widen the start/end range."
+            )
+
         breakpoints = parse_breakpoints(inputs["breakpoints_raw"])
-        breakpoints = validate_breakpoints(breakpoints, t_clean)
+        breakpoints = validate_breakpoints(breakpoints, t_analysis)
 
         results = fit_piecewise_regression(
-            t_clean, y_clean, breakpoints,
+            t_analysis, y_analysis, breakpoints,
             method=inputs["method"], confidence=inputs["confidence"],
         )
         whole_series_result = fit_piecewise_regression(
-            t_clean, y_clean, [],
+            t_analysis, y_analysis, [],
             method=inputs["method"], confidence=inputs["confidence"],
         )[0]
         mk_alpha = 1.0 - inputs["confidence"]
 
         st.session_state["t_clean"] = t_clean
         st.session_state["y_clean"] = y_clean
+        st.session_state["t_analysis"] = t_analysis
+        st.session_state["y_analysis"] = y_analysis
         st.session_state["time_kind"] = time_kind
         st.session_state["cleaning_report"] = cleaning_report
         st.session_state["results"] = results
         st.session_state["whole_series_result"] = whole_series_result
         st.session_state["whole_series_mk"] = (
-            run_mann_kendall(y_clean, alpha=mk_alpha) if inputs["show_mk"] else None
+            run_mann_kendall(y_analysis, alpha=mk_alpha) if inputs["show_mk"] else None
         )
         st.session_state["segment_mk"] = (
             {r.segment_index: run_mann_kendall(r.y_values, alpha=mk_alpha) for r in results}
@@ -493,6 +640,8 @@ def run_analysis() -> None:
         st.session_state["whole_series_result"] = None
         st.session_state["whole_series_mk"] = None
         st.session_state["segment_mk"] = {}
+        st.session_state["t_analysis"] = None
+        st.session_state["y_analysis"] = None
 
 
 run_analysis()
@@ -682,7 +831,14 @@ with tab_regression:
     else:
         results = st.session_state["results"]
         t_clean, y_clean = st.session_state["t_clean"], st.session_state["y_clean"]
+        t_analysis, y_analysis = st.session_state["t_analysis"], st.session_state["y_analysis"]
         units = st.session_state["_analysis_inputs"]["units"]
+
+        st.caption(
+            f"Regression/trend analysis uses {len(t_analysis)} observations from "
+            f"{t_analysis.min():g} to {t_analysis.max():g}; all {len(t_clean)} cleaned "
+            "observations remain visible in the chart."
+        )
 
         view_mode = st.radio(
             "Figure mode",
@@ -721,7 +877,7 @@ with tab_regression:
             st.markdown("---")
             st.subheader("Mann-Kendall Test (whole series)")
             mk = st.session_state["whole_series_mk"]
-            sen = sens_slope(t_clean, y_clean)
+            sen = sens_slope(t_analysis, y_analysis)
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Monotonic-change classification", mk["trend"])
             c2.metric("Kendall's Tau", f"{mk['tau']:.3f}")
@@ -817,6 +973,7 @@ with tab_export:
     else:
         results = st.session_state["results"]
         t_clean, y_clean = st.session_state["t_clean"], st.session_state["y_clean"]
+        t_analysis, y_analysis = st.session_state["t_analysis"], st.session_state["y_analysis"]
         units = st.session_state["_analysis_inputs"]["units"]
 
         st.subheader("Figure Export")
@@ -863,13 +1020,13 @@ with tab_export:
                                 file_name="regression_statistics.json", mime="application/json")
 
         st.markdown("---")
-        st.subheader("Cleaned Data Export")
+        st.subheader("Analysis Data Export")
         date_col = st.session_state["_analysis_inputs"]["date_col"] or "Year"
         value_col = st.session_state["_analysis_inputs"]["value_col"] or "Value"
         st.download_button(
-            "Download cleaned (t, y) series as CSV",
-            data=cleaned_data_to_csv(pd.Series(t_clean), pd.Series(y_clean), date_col, value_col),
-            file_name="cleaned_series.csv", mime="text/csv",
+            "Download analyzed (t, y) subset as CSV",
+            data=cleaned_data_to_csv(pd.Series(t_analysis), pd.Series(y_analysis), date_col, value_col),
+            file_name="analysis_period_series.csv", mime="text/csv",
         )
 
 # ---- ABOUT -----------------------------------------------------------
